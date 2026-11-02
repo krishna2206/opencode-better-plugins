@@ -8,6 +8,6 @@
 import { Plugin } from "@opencode/plugin";
 
 export default Plugin.define({
-  id: "better-plugins",
+  id: "opencode-better-plugins",
   setup: () => {},
 });

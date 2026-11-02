@@ -3,6 +3,8 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { findNodeAtLocation, parse, parseTree, visit, type ParseError } from "jsonc-parser";
 
+export type PluginConfigSource = "server" | "tui";
+
 export interface PluginItem {
   id: string;
   pkg: string;
@@ -11,6 +13,8 @@ export interface PluginItem {
   offset: number;
   length: number;
   raw: string;
+  source?: PluginConfigSource;
+  configPath?: string;
 }
 
 export function extractPluginId(pkg: string): string {
@@ -30,12 +34,17 @@ export function isSelfPlugin(pkg: string): boolean {
   return lower.includes("better-plugins") || lower.includes("opencode-better-plugins");
 }
 
+function globalConfigDir(): string {
+  const xdg = process.env.XDG_CONFIG_HOME?.trim();
+  return join(xdg || join(homedir(), ".config"), "opencode");
+}
+
 export function findConfigFile(preferredPath?: string): string | null {
   if (preferredPath && existsSync(preferredPath)) {
     return preferredPath;
   }
 
-  const globalDir = join(homedir(), ".config", "opencode");
+  const globalDir = globalConfigDir();
   const candidates = [
     join(globalDir, "opencode.jsonc"),
     join(globalDir, "opencode.json"),
@@ -54,6 +63,28 @@ export function findConfigFile(preferredPath?: string): string | null {
   return null;
 }
 
+export function findTuiConfigFile(preferredPath?: string): string | null {
+  if (preferredPath && existsSync(preferredPath)) {
+    return preferredPath;
+  }
+  const candidate = join(globalConfigDir(), "cli.json");
+  return existsSync(candidate) ? candidate : null;
+}
+
+export interface ConfigFileEntry {
+  path: string;
+  source: PluginConfigSource;
+}
+
+export function findAllConfigFiles(): ConfigFileEntry[] {
+  const entries: ConfigFileEntry[] = [];
+  const serverPath = findConfigFile();
+  if (serverPath) entries.push({ path: serverPath, source: "server" });
+  const tuiPath = findTuiConfigFile();
+  if (tuiPath && tuiPath !== serverPath) entries.push({ path: tuiPath, source: "tui" });
+  return entries;
+}
+
 export function validateJsonc(content: string): { valid: boolean; errors: ParseError[] } {
   const errors: ParseError[] = [];
   parse(content, errors, { allowTrailingComma: true });
@@ -63,7 +94,10 @@ export function validateJsonc(content: string): { valid: boolean; errors: ParseE
   };
 }
 
-export function parsePluginItems(content: string): PluginItem[] {
+export function parsePluginItems(
+  content: string,
+  meta?: { source?: PluginConfigSource; configPath?: string }
+): PluginItem[] {
   const tree = parseTree(content);
   if (!tree) return [];
 
@@ -86,6 +120,8 @@ export function parsePluginItems(content: string): PluginItem[] {
         offset: child.offset,
         length: child.length,
         raw,
+        ...(meta?.source ? { source: meta.source } : {}),
+        ...(meta?.configPath ? { configPath: meta.configPath } : {}),
       });
     }
   }
@@ -125,6 +161,8 @@ export function parsePluginItems(content: string): PluginItem[] {
               offset,
               length,
               raw: commentRaw,
+              ...(meta?.source ? { source: meta.source } : {}),
+              ...(meta?.configPath ? { configPath: meta.configPath } : {}),
             });
           }
         }
@@ -174,13 +212,15 @@ export function togglePlugin(
       inner = inner.slice("@disabled".length).trim();
     }
 
-    // Ensure it ends with a comma (valid in JSONC arrays)
-    if (!inner.endsWith(",")) {
+    const before = content.slice(0, target.offset);
+    const after = content.slice(target.offset + target.length);
+    // Ensure a trailing comma (valid in OpenCode's JSONC parser for both
+    // opencode.jsonc and cli.json), without duplicating an existing comma.
+    inner = inner.replace(/,\s*$/, "");
+    if (!after.match(/^\s*,/)) {
       inner += ",";
     }
 
-    const before = content.slice(0, target.offset);
-    const after = content.slice(target.offset + target.length);
     const newContent = before + inner + after;
 
     const validation = validateJsonc(newContent);

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   extractPluginId,
+  findAllConfigFiles,
   isSelfPlugin,
   parsePluginItems,
   togglePlugin,
@@ -199,5 +203,53 @@ describe("config plugin manager", () => {
     items = parsePluginItems(content);
     expect(items.find((p) => p.id === "opencode-todos")?.enabled).toBe(true);
     expect(items.find((p) => p.id === "opencode-session-ref")?.enabled).toBe(false);
+  });
+
+  it("discovers and toggles TUI plugins in cli.json alongside opencode.jsonc", () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), "better-plugins-"));
+    const prevXdg = process.env.XDG_CONFIG_HOME;
+    try {
+      process.env.XDG_CONFIG_HOME = tempRoot;
+      const dir = join(tempRoot, "opencode");
+      mkdirSync(dir, { recursive: true });
+      const serverFile = join(dir, "opencode.jsonc");
+      const tuiFile = join(dir, "cli.json");
+
+      writeFileSync(
+        serverFile,
+        `{\n  "plugins": [\n    { "package": "file:///Users/krishna/Dev/opencode-antigravity/dist" }\n  ]\n}\n`
+      );
+      let cliContent = `{\n  "$schema": "https://opencode.ai/v2/cli.json",\n  "plugins": [\n    {\n      "package": "file:///Users/krishna/Dev/opencode-quota/dist",\n      "options": { "providers": { "antigravity-proxy": { "url": "http://127.0.0.1:7438" } } }\n    }\n  ]\n}\n`;
+      writeFileSync(tuiFile, cliContent);
+
+      const discovered = findAllConfigFiles();
+      expect(discovered).toEqual([
+        { path: serverFile, source: "server" },
+        { path: tuiFile, source: "tui" },
+      ]);
+
+      let tuiItems = parsePluginItems(cliContent, { source: "tui", configPath: tuiFile });
+      expect(tuiItems.length).toBe(1);
+      expect(tuiItems[0]?.id).toBe("opencode-quota");
+      expect(tuiItems[0]?.source).toBe("tui");
+      expect(tuiItems[0]?.configPath).toBe(tuiFile);
+      expect(tuiItems[0]?.enabled).toBe(true);
+
+      // Disable single plugin in cli.json
+      cliContent = togglePlugin(cliContent, tuiItems[0]!).newContent;
+      expect(validateJsonc(cliContent).valid).toBe(true);
+      tuiItems = parsePluginItems(cliContent, { source: "tui", configPath: tuiFile });
+      expect(tuiItems[0]?.enabled).toBe(false);
+
+      // Re-enable single plugin in cli.json
+      cliContent = togglePlugin(cliContent, tuiItems[0]!).newContent;
+      expect(validateJsonc(cliContent).valid).toBe(true);
+      tuiItems = parsePluginItems(cliContent, { source: "tui", configPath: tuiFile });
+      expect(tuiItems[0]?.enabled).toBe(true);
+    } finally {
+      if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = prevXdg;
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
   });
 });

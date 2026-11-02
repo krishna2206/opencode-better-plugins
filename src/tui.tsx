@@ -13,17 +13,18 @@ import {
   type JSX,
 } from "solid-js";
 import {
-  findConfigFile,
+  findAllConfigFiles,
   parsePluginItems,
   readConfigFile,
   togglePlugin,
   writeConfigFile,
+  type ConfigFileEntry,
   type PluginItem,
 } from "./config.js";
 
 type Ctx = Plugin.Context;
 
-const id = "better-plugins";
+const id = "opencode-better-plugins";
 const PAGE_SIZE = 8;
 
 interface ThemePalette {
@@ -57,19 +58,25 @@ function getColors(ctx: Ctx): ThemePalette {
   };
 }
 
+function itemKey(p: PluginItem): string {
+  return `${p.source ?? "server"}:${p.id}`;
+}
+
 function formatDetails(p: PluginItem): string {
+  const tags: string[] = [];
+  if (p.source === "tui") tags.push("[tui]");
   if (p.options && typeof p.options === "object") {
     const parts = Object.entries(p.options).map(
       ([k, v]) => `${k}: ${typeof v === "string" ? `"${v}"` : JSON.stringify(v)}`
     );
-    return parts.join(", ");
+    if (parts.length > 0) tags.push(parts.join(", "));
   }
-  return "";
+  return tags.join(" · ");
 }
 
 interface DialogProps {
   ctx: Ctx;
-  configPath: string;
+  configs: ConfigFileEntry[];
   onClose: () => void;
 }
 
@@ -83,9 +90,12 @@ function PluginManagerDialog(props: DialogProps): JSX.Element {
 
   const loadPlugins = () => {
     try {
-      const content = readConfigFile(props.configPath);
-      const items = parsePluginItems(content);
-      setPlugins(items);
+      const all: PluginItem[] = [];
+      for (const entry of props.configs) {
+        const content = readConfigFile(entry.path);
+        all.push(...parsePluginItems(content, { source: entry.source, configPath: entry.path }));
+      }
+      setPlugins(all);
     } catch (err) {
       props.ctx.ui.toast.show({
         title: "Plugins Manager",
@@ -136,26 +146,27 @@ function PluginManagerDialog(props: DialogProps): JSX.Element {
   const activeCount = createMemo(() => plugins().filter((p) => p.enabled).length);
 
   const toggle = async (p: PluginItem) => {
-    if (loading()) return;
-    setLoading(p.id);
+    if (loading() || !p.configPath) return;
+    setLoading(itemKey(p));
     props.ctx.renderer.requestRender();
 
     try {
-      const content = readConfigFile(props.configPath);
-      const latestItems = parsePluginItems(content);
+      const content = readConfigFile(p.configPath);
+      const latestItems = parsePluginItems(content, { source: p.source, configPath: p.configPath });
       const freshTarget = latestItems.find((item) => item.id === p.id);
 
       if (!freshTarget) {
-        throw new Error(`Plugin "${p.id}" introuvable dans ${props.configPath}`);
+        throw new Error(`Plugin "${p.id}" introuvable dans ${p.configPath}`);
       }
 
       const { newContent, toggledTo } = togglePlugin(content, freshTarget);
-      writeConfigFile(props.configPath, newContent);
+      writeConfigFile(p.configPath, newContent);
 
-      const refreshed = parsePluginItems(newContent);
-      setPlugins(refreshed);
+      loadPlugins();
 
-      await props.ctx.client.location.reload();
+      if (p.source !== "tui") {
+        await props.ctx.client.location.reload();
+      }
 
       props.ctx.ui.toast.show({
         title: "Plugins Manager",
@@ -273,7 +284,7 @@ function PluginManagerDialog(props: DialogProps): JSX.Element {
             {(p, visibleIdx) => {
               const actualIdx = () => startIndex() + visibleIdx();
               const isSelected = () => actualIdx() === selectedIndex();
-              const isBusy = () => loading() === p.id;
+              const isBusy = () => loading() === itemKey(p);
               const rowBg = () => (isSelected() ? colors().selectedBg : colors().bodyBg);
 
               return (
@@ -307,7 +318,7 @@ function PluginManagerDialog(props: DialogProps): JSX.Element {
 
                   <Show when={formatDetails(p)}>
                     <box backgroundColor={rowBg()} marginLeft={2} flexShrink={1}>
-                      <text fg={colors().mutedColor} truncate>
+                      <text fg={colors().mutedColor} wrapMode="none" truncate>
                         {formatDetails(p)}
                       </text>
                     </box>
@@ -347,18 +358,18 @@ function PluginManagerDialog(props: DialogProps): JSX.Element {
 }
 
 function openPluginManager(ctx: Ctx) {
-  const configPath = findConfigFile();
-  if (!configPath) {
+  const configs = findAllConfigFiles();
+  if (configs.length === 0) {
     ctx.ui.toast.show({
       title: "Plugins Manager",
-      message: "Fichier de configuration opencode.jsonc introuvable.",
+      message: "Fichier de configuration opencode.jsonc / cli.json introuvable.",
       variant: "error",
     });
     return;
   }
 
   ctx.ui.dialog.show(
-    () => <PluginManagerDialog ctx={ctx} configPath={configPath} onClose={() => ctx.ui.dialog.clear()} />,
+    () => <PluginManagerDialog ctx={ctx} configs={configs} onClose={() => ctx.ui.dialog.clear()} />,
     () => {}
   );
   ctx.ui.dialog.set({ size: "large" });
@@ -375,8 +386,9 @@ export default Plugin.define({
           commands: [
             {
               id: "plugins.manage",
-              title: "Manage Plugins",
+              title: "Manage Plugins (Better Plugins)",
               group: "Plugins",
+              palette: true,
               bind: false,
               slash: { name: "better-plugins" },
               run: () => openPluginManager(ctx),
